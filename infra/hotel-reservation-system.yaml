@@ -1,0 +1,780 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  High-concurrency Hotel Reservation System infrastructure.
+  ALB + Lambda microservices, RDS PostgreSQL (Multi-AZ),
+  ElastiCache Redis, S3 + CloudFront, SQS DLQ, CloudWatch Logs,
+  and least-privilege IAM roles.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging]
+  DBMasterUsername:
+    Type: String
+    Default: hoteladmin
+    NoEcho: true
+  DBMasterPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 12
+    Description: Master password for RDS (min 12 characters)
+  LambdaCodeBucket:
+    Type: String
+    Description: S3 bucket containing Lambda deployment packages
+  LambdaCodeKeyPrefix:
+    Type: String
+    Default: lambda/
+    Description: S3 key prefix for Lambda zip files
+
+Resources:
+  # ============================================================
+  # NETWORKING - VPC, Subnets, NAT Gateway, Route Tables
+  # ============================================================
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-hotel-vpc
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-igw
+
+  IGWAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Public Subnets (2 AZs - for ALB, NAT Gateway)
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-public-a
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-public-b
+
+  # Private Subnets (for Lambda, RDS, ElastiCache)
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.10.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-private-a
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.11.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-private-b
+
+  # NAT Gateway (single for cost efficiency)
+  NATElasticIP:
+    Type: AWS::EC2::EIP
+    DependsOn: IGWAttachment
+    Properties:
+      Domain: vpc
+
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NATElasticIP.AllocationId
+      SubnetId: !Ref PublicSubnetA
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-nat
+
+  # Route Tables
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-public-rt
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IGWAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetARouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetBRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-private-rt
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway
+
+  PrivateSubnetARouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetBRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetB
+      RouteTableId: !Ref PrivateRouteTable
+
+  # ============================================================
+  # SECURITY GROUPS
+  # ============================================================
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Application Load Balancer
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrBlock: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrBlock: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-alb-sg
+
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Lambda functions
+      VpcId: !Ref VPC
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrBlock: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-lambda-sg
+
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for RDS PostgreSQL
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref LambdaSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-rds-sg
+
+  RedisSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for ElastiCache Redis
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 6379
+          ToPort: 6379
+          SourceSecurityGroupId: !Ref LambdaSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-redis-sg
+
+  # ============================================================
+  # APPLICATION LOAD BALANCER
+  # ============================================================
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub ${EnvironmentName}-hotel-alb
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetB
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-hotel-alb
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultAction:
+        Type: fixed-response
+        FixedResponseConfig:
+          StatusCode: '404'
+          ContentType: application/json
+          MessageBody: '{"error":"Not Found"}'
+
+  # Target Groups (Lambda targets)
+  HotelServiceTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: HotelServiceALBPermission
+    Properties:
+      Name: !Sub ${EnvironmentName}-hotel-tg
+      TargetType: lambda
+      Targets:
+        - Id: !GetAtt HotelServiceFunction.Arn
+
+  RateServiceTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: RateServiceALBPermission
+    Properties:
+      Name: !Sub ${EnvironmentName}-rate-tg
+      TargetType: lambda
+      Targets:
+        - Id: !GetAtt RateServiceFunction.Arn
+
+  ReservationServiceTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: ReservationServiceALBPermission
+    Properties:
+      Name: !Sub ${EnvironmentName}-reservation-tg
+      TargetType: lambda
+      Targets:
+        - Id: !GetAtt ReservationServiceFunction.Arn
+
+  # Listener Rules (path-based routing)
+  HotelsListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ALBListener
+      Priority: 10
+      Conditions:
+        - Field: path-pattern
+          Values: ['/hotels', '/hotels/*']
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref HotelServiceTargetGroup
+
+  RatesListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ALBListener
+      Priority: 20
+      Conditions:
+        - Field: path-pattern
+          Values: ['/rates', '/rates/*']
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref RateServiceTargetGroup
+
+  ReservationsListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ALBListener
+      Priority: 30
+      Conditions:
+        - Field: path-pattern
+          Values: ['/reservations', '/reservations/*']
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref ReservationServiceTargetGroup
+
+  # ============================================================
+  # DATABASE - RDS PostgreSQL Multi-AZ
+  # ============================================================
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Private subnets for RDS
+      SubnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-db-subnet-group
+
+  HotelDatabase:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub ${EnvironmentName}-hotel-db
+      Engine: postgres
+      EngineVersion: '16.4'
+      DBInstanceClass: db.r6g.xlarge
+      AllocatedStorage: 600
+      MaxAllocatedStorage: 2000
+      StorageType: gp3
+      Iops: 12000
+      StorageThroughput: 500
+      MultiAZ: true
+      MasterUsername: !Ref DBMasterUsername
+      MasterUserPassword: !Ref DBMasterPassword
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+      BackupRetentionPeriod: 7
+      PreferredBackupWindow: 03:00-04:00
+      PreferredMaintenanceWindow: sun:04:30-sun:05:30
+      EnablePerformanceInsights: true
+      PerformanceInsightsRetentionPeriod: 7
+      DeletionProtection: true
+      CopyTagsToSnapshot: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-hotel-db
+
+  # ============================================================
+  # CACHING - ElastiCache Redis (Multi-AZ)
+  # ============================================================
+  RedisSubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      Description: Private subnets for ElastiCache Redis
+      SubnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+
+  RedisReplicationGroup:
+    Type: AWS::ElastiCache::ReplicationGroup
+    Properties:
+      ReplicationGroupDescription: Redis cache for room availability lookups
+      Engine: redis
+      EngineVersion: '7.1'
+      CacheNodeType: cache.r6g.large
+      NumNodeGroups: 1
+      ReplicasPerNodeGroup: 1
+      AutomaticFailoverEnabled: true
+      MultiAZEnabled: true
+      CacheSubnetGroupName: !Ref RedisSubnetGroup
+      SecurityGroupIds:
+        - !Ref RedisSecurityGroup
+      AtRestEncryptionEnabled: true
+      TransitEncryptionEnabled: true
+      SnapshotRetentionLimit: 3
+      SnapshotWindow: 02:00-03:00
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-hotel-redis
+
+  # ============================================================
+  # SQS - Dead Letter Queue for ReservationService
+  # ============================================================
+  ReservationDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${EnvironmentName}-reservation-dlq
+      MessageRetentionPeriod: 1209600
+      VisibilityTimeout: 300
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-reservation-dlq
+
+  # ============================================================
+  # CLOUDWATCH LOG GROUPS
+  # ============================================================
+  HotelServiceLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${EnvironmentName}-hotel-service
+      RetentionInDays: 30
+
+  RateServiceLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${EnvironmentName}-rate-service
+      RetentionInDays: 30
+
+  ReservationServiceLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${EnvironmentName}-reservation-service
+      RetentionInDays: 30
+
+  # ============================================================
+  # IAM ROLES - Least Privilege
+  # ============================================================
+  HotelServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-hotel-service-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: HotelServicePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt HotelServiceLogGroup.Arn
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub ${HotelImagesBucket.Arn}/*
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !GetAtt HotelImagesBucket.Arn
+
+  RateServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-rate-service-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: RateServicePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt RateServiceLogGroup.Arn
+
+  ReservationServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-reservation-service-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: ReservationServicePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt ReservationServiceLogGroup.Arn
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt ReservationDLQ.Arn
+
+  # ============================================================
+  # LAMBDA FUNCTIONS
+  # ============================================================
+  HotelServiceFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${EnvironmentName}-hotel-service
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Sub ${LambdaCodeKeyPrefix}hotel-service.zip
+      Role: !GetAtt HotelServiceRole.Arn
+      MemorySize: 512
+      Timeout: 30
+      ReservedConcurrentExecutions: 100
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnetA
+          - !Ref PrivateSubnetB
+      Environment:
+        Variables:
+          DB_HOST: !GetAtt HotelDatabase.Endpoint.Address
+          DB_PORT: !GetAtt HotelDatabase.Endpoint.Port
+          DB_NAME: hoteldb
+          REDIS_HOST: !GetAtt RedisReplicationGroup.PrimaryEndPoint.Address
+          REDIS_PORT: !GetAtt RedisReplicationGroup.PrimaryEndPoint.Port
+          S3_BUCKET: !Ref HotelImagesBucket
+          ENVIRONMENT: !Ref EnvironmentName
+      LoggingConfig:
+        LogGroup: !Ref HotelServiceLogGroup
+      Tags:
+        - Key: Service
+          Value: hotel-service
+
+  RateServiceFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${EnvironmentName}-rate-service
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Sub ${LambdaCodeKeyPrefix}rate-service.zip
+      Role: !GetAtt RateServiceRole.Arn
+      MemorySize: 256
+      Timeout: 15
+      ReservedConcurrentExecutions: 50
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnetA
+          - !Ref PrivateSubnetB
+      Environment:
+        Variables:
+          DB_HOST: !GetAtt HotelDatabase.Endpoint.Address
+          DB_PORT: !GetAtt HotelDatabase.Endpoint.Port
+          DB_NAME: hoteldb
+          REDIS_HOST: !GetAtt RedisReplicationGroup.PrimaryEndPoint.Address
+          REDIS_PORT: !GetAtt RedisReplicationGroup.PrimaryEndPoint.Port
+          ENVIRONMENT: !Ref EnvironmentName
+      LoggingConfig:
+        LogGroup: !Ref RateServiceLogGroup
+      Tags:
+        - Key: Service
+          Value: rate-service
+
+  ReservationServiceFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${EnvironmentName}-reservation-service
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Sub ${LambdaCodeKeyPrefix}reservation-service.zip
+      Role: !GetAtt ReservationServiceRole.Arn
+      MemorySize: 512
+      Timeout: 30
+      ReservedConcurrentExecutions: 200
+      DeadLetterConfig:
+        TargetArn: !GetAtt ReservationDLQ.Arn
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnetA
+          - !Ref PrivateSubnetB
+      Environment:
+        Variables:
+          DB_HOST: !GetAtt HotelDatabase.Endpoint.Address
+          DB_PORT: !GetAtt HotelDatabase.Endpoint.Port
+          DB_NAME: hoteldb
+          REDIS_HOST: !GetAtt RedisReplicationGroup.PrimaryEndPoint.Address
+          REDIS_PORT: !GetAtt RedisReplicationGroup.PrimaryEndPoint.Port
+          DLQ_URL: !Ref ReservationDLQ
+          ENVIRONMENT: !Ref EnvironmentName
+      LoggingConfig:
+        LogGroup: !Ref ReservationServiceLogGroup
+      Tags:
+        - Key: Service
+          Value: reservation-service
+
+  # Lambda Permissions for ALB invocation
+  HotelServiceALBPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref HotelServiceFunction
+      Action: lambda:InvokeFunction
+      Principal: elasticloadbalancing.amazonaws.com
+
+  RateServiceALBPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref RateServiceFunction
+      Action: lambda:InvokeFunction
+      Principal: elasticloadbalancing.amazonaws.com
+
+  ReservationServiceALBPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ReservationServiceFunction
+      Action: lambda:InvokeFunction
+      Principal: elasticloadbalancing.amazonaws.com
+
+  # ============================================================
+  # S3 + CLOUDFRONT - Static Content
+  # ============================================================
+  HotelImagesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${EnvironmentName}-hotel-images-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      IntelligentTieringConfigurations:
+        - Id: ArchiveOldImages
+          Status: Enabled
+          Tierings:
+            - AccessTier: ARCHIVE_ACCESS
+              Days: 90
+            - AccessTier: DEEP_ARCHIVE_ACCESS
+              Days: 180
+      LifecycleConfiguration:
+        Rules:
+          - Id: CleanupIncompleteUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-hotel-images
+
+  HotelImagesBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref HotelImagesBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontOAC
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub ${HotelImagesBucket.Arn}/*
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}
+
+  CloudFrontOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub ${EnvironmentName}-hotel-images-oac
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub ${EnvironmentName} Hotel Images CDN
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          Compress: true
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt HotelImagesBucket.RegionalDomainName
+            OriginAccessControlId: !Ref CloudFrontOAC
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+        PriceClass: PriceClass_100
+        HttpVersion: http2and3
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-hotel-cdn
+
+# ============================================================
+# OUTPUTS
+# ============================================================
+Outputs:
+  ALBEndpoint:
+    Description: Application Load Balancer DNS name
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+
+  ALBArn:
+    Description: ALB ARN
+    Value: !Ref ApplicationLoadBalancer
+
+  DatabaseEndpoint:
+    Description: RDS PostgreSQL endpoint
+    Value: !GetAtt HotelDatabase.Endpoint.Address
+
+  DatabasePort:
+    Description: RDS PostgreSQL port
+    Value: !GetAtt HotelDatabase.Endpoint.Port
+
+  RedisEndpoint:
+    Description: ElastiCache Redis primary endpoint
+    Value: !GetAtt RedisReplicationGroup.PrimaryEndPoint.Address
+
+  RedisPort:
+    Description: ElastiCache Redis port
+    Value: !GetAtt RedisReplicationGroup.PrimaryEndPoint.Port
+
+  CloudFrontDomain:
+    Description: CloudFront distribution domain for hotel images
+    Value: !GetAtt CloudFrontDistribution.DomainName
+
+  ImagesBucket:
+    Description: S3 bucket for hotel images
+    Value: !Ref HotelImagesBucket
+
+  ReservationDLQUrl:
+    Description: SQS Dead Letter Queue URL for failed reservations
+    Value: !Ref ReservationDLQ
+
+  VpcId:
+    Description: VPC ID
+    Value: !Ref VPC

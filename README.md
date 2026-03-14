@@ -30,11 +30,13 @@ This project focuses on the design and implementation of a high-concurrency hote
 
 The system employs a microservices architecture to decouple core business logic. Kiro is used to orchestrate the following AWS components:
 
-- **AWS API Gateway:** Acts as the entry point for all requests, handling authentication, rate limiting, and routing to specific microservices.
-- **AWS Lambda:** Hosts stateless microservices including the Hotel Service, Rate Service, and Reservation Service.
-- **Amazon RDS (PostgreSQL/MySQL):** Serves as the primary relational data store to manage transactional integrity and ACID properties.
-- **Amazon ElastiCache (Redis):** Implements an inventory cache layer to reduce database load and speed up availability checks.
-- **Amazon S3 & CloudFront:** Manages and distributes static assets like hotel images with low latency via a CDN.
+- **Application Load Balancer (ALB):** Deployed in public subnets as the primary traffic distributor. Routes requests to Lambda targets based on path patterns (`/hotels`, `/rates`, `/reservations`). All ALB-to-Lambda traffic stays within the VPC.
+- **AWS Lambda:** Hosts stateless microservices including the Hotel Service (512MB), Rate Service (256MB), and Reservation Service (512MB), all deployed in private subnets.
+- **Amazon RDS (PostgreSQL):** Serves as the primary relational data store (db.r6g.xlarge, 600GB gp3, 12K IOPS) with Multi-AZ standby for synchronous replication and automatic failover.
+- **Amazon ElastiCache (Redis):** Multi-AZ cluster (cache.r6g.large) for high-speed inventory availability lookups, reducing RDS read load by 80%+.
+- **Amazon S3 & CloudFront:** S3 bucket with Intelligent-Tiering for hotel images, served globally via CloudFront CDN using Origin Access Control (OAC).
+- **Amazon SQS:** Dead Letter Queue for the Reservation Service to capture and retry failed invocations.
+- **Amazon CloudWatch:** Dedicated Log Groups for each Lambda function with 30-day retention.
 
 ### Data Model Design
 
@@ -56,11 +58,33 @@ To resolve race conditions during peak booking times, the following strategies a
 
 ---
 
+## Resilience, Fault Tolerance, and Cost Optimization
+
+- **High Availability:** RDS Multi-AZ with synchronous replication ensures automatic failover. ElastiCache Redis runs in Multi-AZ with automatic failover enabled.
+
+- **Fault Tolerance:** The Reservation Service Lambda is configured with a Dead Letter Queue (SQS) to capture and retry failed invocations without losing user data.
+
+- **Cost Efficiency:** Serverless Lambda functions scale to zero during low-traffic hours. The ALB provides cost-effective load balancing with path-based routing to Lambda targets.
+
+- **Storage Optimization:** S3 Intelligent-Tiering automatically moves older hotel images to Archive Access (90 days) and Deep Archive Access (180 days).
+
+- **Read Scaling:** ElastiCache Redis reduces expensive RDS read operations by over 80%, maintaining sub-millisecond latency for availability checks.
+
+- **Observability:** CloudWatch Log Groups with 30-day retention for all Lambda functions enable monitoring and debugging.
+
+---
+
 ## Technology Stack Summary
 
-| Component        | Technology                        |
-|------------------|-----------------------------------|
-| Cloud Provider   | AWS                               |
-| IaC / Deployment | Kiro                              |
-| Database         | Relational (RDS) + Caching (Redis)|
-| Architecture     | Microservices (Lambda, API Gateway)|
+| Component          | Technology                                          |
+|--------------------|-----------------------------------------------------|
+| Cloud Provider     | AWS                                                 |
+| IaC / Deployment   | Kiro (CloudFormation)                               |
+| Load Balancing     | Application Load Balancer (ALB)                     |
+| Compute            | AWS Lambda (Node.js 20.x)                           |
+| Database           | RDS PostgreSQL 16.4 (r6g.xlarge, 600GB, Multi-AZ)  |
+| Caching            | ElastiCache Redis 7.1 (r6g.large, Multi-AZ)        |
+| Static Content     | S3 (Intelligent-Tiering) + CloudFront CDN (OAC)    |
+| Messaging          | SQS (Dead Letter Queue)                             |
+| Observability      | CloudWatch Logs                                     |
+| Security           | IAM (least privilege), VPC, Security Groups         |

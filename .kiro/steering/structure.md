@@ -1,12 +1,14 @@
 # Project Structure
 
-This project is in early stages — no source code exists yet. The current repo contains only a README with requirements and system design.
+This project is in early stages. Infrastructure configuration exists as CloudFormation, but no application source code yet.
 
 ## Current Layout
 ```
 .
 ├── .kiro/
 │   └── steering/       # AI steering rules (this directory)
+├── infra/
+│   └── hotel-reservation-system.yaml  # CloudFormation template (full stack)
 ├── README.md           # Requirements and system design documentation
 ```
 
@@ -18,7 +20,7 @@ When implementation begins, expect a microservices layout with separate Lambda h
 ├── .kiro/
 │   ├── specs/          # Feature specs
 │   └── steering/       # Steering rules
-├── infra/              # AWS CDK infrastructure code
+├── infra/              # CloudFormation / AWS CDK infrastructure code
 ├── services/
 │   ├── hotel/          # Hotel management service (Lambda)
 │   ├── rate/           # Dynamic pricing service (Lambda)
