@@ -1,20 +1,26 @@
 # =============================================================================
 # S3 Buckets + CloudFront Distributions for CondoManager Pro
 # Photos bucket with CDN, Frontend bucket with website hosting and CDN
+# Buckets are created manually via AWS Console (SCP blocks Terraform creation)
+# and imported into state with: terraform import module.storage.aws_s3_bucket.photos <name>
 # =============================================================================
-
-# --- Random suffix for globally unique bucket names ---
-
-resource "random_id" "suffix" {
-  byte_length = 4
-}
 
 # =============================================================================
 # Photos Bucket + CloudFront
 # =============================================================================
 
 resource "aws_s3_bucket" "photos" {
-  bucket = "${var.environment}-condomanager-photos-${random_id.suffix.hex}"
+  bucket = var.photos_bucket_name
+
+  tags = {
+    Team = var.team_tag
+    Name = var.name_tag
+  }
+
+  lifecycle {
+    prevent_destroy = true
+    ignore_changes  = [tags, tags_all]
+  }
 }
 
 resource "aws_s3_bucket_public_access_block" "photos" {
@@ -81,7 +87,17 @@ resource "aws_cloudfront_distribution" "photos" {
 # =============================================================================
 
 resource "aws_s3_bucket" "frontend" {
-  bucket = "${var.environment}-condomanager-frontend-${random_id.suffix.hex}"
+  bucket = var.frontend_bucket_name
+
+  tags = {
+    Team = var.team_tag
+    Name = var.name_tag
+  }
+
+  lifecycle {
+    prevent_destroy = true
+    ignore_changes  = [tags, tags_all]
+  }
 }
 
 resource "aws_s3_bucket_website_configuration" "frontend" {

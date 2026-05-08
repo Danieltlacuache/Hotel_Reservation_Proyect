@@ -42,6 +42,13 @@ terraform {
 
 provider "aws" {
   region = var.aws_region
+
+  default_tags {
+    tags = {
+      Team = var.team_tag
+      Name = var.name_tag
+    }
+  }
 }
 
 # -----------------------------------------------------------------------------
@@ -71,10 +78,12 @@ module "secrets" {
 # -----------------------------------------------------------------------------
 
 module "storage" {
-  source      = "./modules/storage"
-  environment = var.environment
-  team_tag    = var.team_tag
-  name_tag    = var.name_tag
+  source               = "./modules/storage"
+  environment          = var.environment
+  team_tag             = var.team_tag
+  name_tag             = var.name_tag
+  photos_bucket_name   = var.photos_bucket_name
+  frontend_bucket_name = var.frontend_bucket_name
 }
 
 # -----------------------------------------------------------------------------
