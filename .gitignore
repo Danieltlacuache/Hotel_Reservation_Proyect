@@ -1,0 +1,13 @@
+.aws-sam/
+.kiro/
+.terraform/
+terraform/.terraform/
+__pycache__/
+*.pyc
+*.tfstate
+*.tfstate.backup
+*.zip
+*.log
+*.env
+
+docs/infrastructure-guide.md
