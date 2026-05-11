@@ -11,3 +11,9 @@ __pycache__/
 *.env
 
 docs/infrastructure-guide.md
+
+# Local development artifacts (not needed for AWS deployment)
+documentation/
+infra/
+src/
+openapi.yaml
