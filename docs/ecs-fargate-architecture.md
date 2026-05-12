@@ -28,7 +28,7 @@ graph TB
             subgraph PrivateSubnets["Private Subnets (us-east-1a, us-east-1b)"]
 
                 subgraph ECSCluster["ECS Cluster (Fargate)"]
-                    AppService["ECS Service: reservflow<br/>Next.js Container :3000<br/>256 CPU | 512 MB"]
+                    AppService["ECS Service: reservflow<br/>Next.js Container :3000<br/>256 CPU | 512 MB<br/>Auto-scaling: 1-3 tasks (CPU 70%)"]
                     MigrationTask["Migration Task (one-off)<br/>postgres:15-alpine<br/>SQL migrations + seeds"]
                 end
 
@@ -104,6 +104,21 @@ All resources tagged with:
 - `Owner = "daniel.guzman@iteso.mx"`
 
 Applied via Terraform `default_tags` + explicit tags on every resource.
+
+## Auto-Scaling
+
+| Parameter | Value |
+|-----------|-------|
+| Min tasks | 1 |
+| Max tasks | 3 |
+| Metric | ECSServiceAverageCPUUtilization |
+| Threshold | 70% |
+| Scale-out cooldown | 60 seconds |
+| Scale-in cooldown | 300 seconds |
+
+The ALB automatically distributes traffic across all running tasks. When CPU exceeds 70% average, ECS launches additional tasks (up to 3). When load decreases, it scales back down after 5 minutes of cooldown.
+
+During load testing (3,600+ requests in 3 minutes), the service did not scale because Redis Cache-Aside absorbs 95%+ of read traffic without significant CPU impact. Scaling would activate under write-heavy workloads or Redis failures.
 
 ## Terraform Outputs
 

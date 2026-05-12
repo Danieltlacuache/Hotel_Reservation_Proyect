@@ -17,7 +17,7 @@ ReservFlow is a hotel reservation system built as a monolithic Next.js 14 applic
 | Runtime | Node.js 20 Alpine |
 | Database | PostgreSQL 15 (AWS RDS) |
 | Cache | Redis 7.x (AWS ElastiCache) |
-| Compute | AWS ECS Fargate |
+| Compute | AWS ECS Fargate (auto-scaling 1-3 tasks) |
 | Load Balancer | AWS ALB (IP-restricted) |
 | Container Registry | AWS ECR |
 | Secrets | AWS Secrets Manager |
@@ -49,7 +49,7 @@ graph TB
             subgraph PrivateSubnets["Private Subnets (us-east-1a, us-east-1b)"]
 
                 subgraph ECSCluster["ECS Cluster (Fargate)"]
-                    AppService["ECS Service: reservflow<br/>Task: Next.js Container<br/>Port 3000 | 256 CPU | 512 MB"]
+                    AppService["ECS Service: reservflow<br/>Next.js Container :3000<br/>256 CPU | 512 MB<br/>Auto-scaling: 1-3 tasks (CPU 70%)"]
                     MigrationTask["Migration Task (one-off)<br/>PostgreSQL Client<br/>Runs SQL migrations + seeds"]
                 end
 
