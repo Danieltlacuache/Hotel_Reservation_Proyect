@@ -1,18 +1,22 @@
-# =============================================================================
-# Variables for Secrets module
-# =============================================================================
+variable "database_url" {
+  description = "PostgreSQL connection string"
+  type        = string
+  sensitive   = true
+}
+
+variable "redis_url" {
+  description = "Redis connection URL"
+  type        = string
+  sensitive   = true
+}
+
+variable "rds_password" {
+  description = "RDS master password"
+  type        = string
+  sensitive   = true
+}
 
 variable "environment" {
-  description = "Environment name used as prefix for secret names (e.g. dev, prod)"
-  type        = string
-}
-
-variable "team_tag" {
-  description = "Team tag required by AWS organization SCP"
-  type        = string
-}
-
-variable "name_tag" {
-  description = "Name tag (email) required by AWS organization SCP"
+  description = "Environment name (dev, staging, prod)"
   type        = string
 }

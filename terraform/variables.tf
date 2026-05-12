@@ -1,16 +1,9 @@
 # =============================================================================
-# CondoManager Pro — Global Terraform Variables
+# ReservFlow — Root Terraform Variables
 # =============================================================================
-# These variables are referenced by the root module (main.tf) and passed down
-# to child modules. Override them per environment using tfvars files:
+# Override per environment using tfvars files:
 #   terraform apply -var-file=environments/dev.tfvars
-#   terraform apply -var-file=environments/prod.tfvars
 # =============================================================================
-
-variable "environment" {
-  description = "Environment name used as prefix for resource names (e.g. dev, prod)"
-  type        = string
-}
 
 variable "aws_region" {
   description = "AWS region where all resources will be created"
@@ -18,61 +11,71 @@ variable "aws_region" {
   default     = "us-east-1"
 }
 
+variable "environment" {
+  description = "Deployment environment (dev, staging, prod)"
+  type        = string
+
+  validation {
+    condition     = contains(["dev", "staging", "prod"], var.environment)
+    error_message = "Environment must be one of: dev, staging, prod."
+  }
+}
+
 variable "team_tag" {
-  description = "Team tag required by AWS organization policy"
+  description = "Team tag required by AWS organization SCP"
   type        = string
   default     = "team-7"
 }
 
 variable "name_tag" {
-  description = "Name tag (ITESO email) required by AWS organization policy"
+  description = "Name tag (ITESO email) required by AWS organization SCP"
   type        = string
   default     = "daniel.guzman@iteso.mx"
 }
 
-variable "lambda_memory_size" {
-  description = "Amount of memory in MB for the Lambda function"
-  type        = number
-  default     = 512
-}
-
-variable "lambda_timeout" {
-  description = "Timeout in seconds for the Lambda function"
-  type        = number
-  default     = 30
-}
-
-variable "log_retention_days" {
-  description = "Number of days to retain CloudWatch logs"
-  type        = number
-  default     = 14
-}
-
-variable "image_tag" {
-  description = "Docker image tag for the Lambda container (typically a commit SHA)"
+variable "vpc_cidr" {
+  description = "CIDR block for the VPC"
   type        = string
+  default     = "10.0.0.0/16"
 }
 
-variable "ecr_repository_url" {
-  description = "ECR repository URL for the Lambda container image"
+variable "availability_zones" {
+  description = "List of availability zones for subnet placement"
+  type        = list(string)
+  default     = ["us-east-1a", "us-east-1b"]
+}
+
+variable "db_password" {
+  description = "Master password for the RDS PostgreSQL instance"
   type        = string
-  default     = "311141527383.dkr.ecr.us-east-1.amazonaws.com/condomanager-backend"
+  sensitive   = true
+}
+
+variable "container_image_tag" {
+  description = "Docker image tag for the ECS task container (e.g. commit SHA or 'latest')"
+  type        = string
+  default     = "latest"
+}
+
+variable "certificate_arn" {
+  description = "ACM certificate ARN for HTTPS on ALB and CloudFront (empty string disables HTTPS)"
+  type        = string
+  default     = ""
+}
+
+variable "custom_domain" {
+  description = "Custom domain name (empty string disables)"
+  type        = string
+  default     = ""
+}
+
+variable "allowed_cidr_blocks" {
+  description = "List of CIDR blocks allowed to access the ALB (your public IP/32). Update with your current public IP before applying."
+  type        = list(string)
 }
 
 variable "sns_email" {
   description = "Email address for SNS alarm notifications (empty string disables subscription)"
   type        = string
   default     = ""
-}
-
-variable "photos_bucket_name" {
-  description = "Name of the pre-created S3 photos bucket"
-  type        = string
-  default     = "dev-condomanager-photos-team7"
-}
-
-variable "frontend_bucket_name" {
-  description = "Name of the pre-created S3 frontend bucket"
-  type        = string
-  default     = "dev-condomanager-frontend-team7"
 }

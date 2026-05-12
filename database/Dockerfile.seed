@@ -1,0 +1,5 @@
+FROM postgres:15-alpine
+
+COPY seeds/ /seeds/
+
+ENTRYPOINT ["sh", "-c", "psql $DATABASE_URL -f /seeds/seed_rooms.sql"]

@@ -1,165 +1,114 @@
-# ReservFlow — ECS Fargate Infrastructure Architecture
+# ReservFlow — ECS Fargate Infrastructure Architecture (Private)
+
+## Key Design Decisions
+
+- **No NAT Gateway** — VPC Endpoints replace internet access for AWS services
+- **No 0.0.0.0/0** — ALB restricted to specific IP CIDRs only
+- **No CloudFront** — direct ALB access from allowed IPs
+- **VPC Endpoints** for ECR API, ECR Docker, S3 (Gateway), Secrets Manager, CloudWatch Logs
+- **All egress restricted** to VPC CIDR + S3 prefix list (no internet)
 
 ## System Architecture
 
 ```mermaid
 graph TB
     subgraph Internet
-        User[("👤 User Browser")]
+        User[("👤 User Browser<br/>(IP-restricted)")]
     end
 
-    subgraph AWS["AWS Cloud — us-east-1 (Account: 311141527383)"]
-        
-        subgraph CF["CloudFront (Edge)"]
-            CDN["CloudFront Distribution<br/>PriceClass_100<br/>HTTP → HTTPS redirect"]
-        end
+    subgraph AWS["AWS Cloud — us-east-1 (Fully Private)"]
 
         subgraph VPC["VPC — 10.0.0.0/16"]
-            
+
             subgraph PublicSubnets["Public Subnets (us-east-1a, us-east-1b)"]
-                ALB["Application Load Balancer<br/>Internet-facing<br/>Port 80/443"]
-                NAT["NAT Gateway<br/>+ Elastic IP"]
+                ALB["Application Load Balancer<br/>Internet-facing<br/>Port 80 (IP-restricted only)"]
                 IGW["Internet Gateway"]
             end
 
             subgraph PrivateSubnets["Private Subnets (us-east-1a, us-east-1b)"]
-                
+
                 subgraph ECSCluster["ECS Cluster (Fargate)"]
-                    AppService["ECS Service: reservflow<br/>Task: Next.js Container<br/>Port 3000 | 256 CPU | 512 MB"]
-                    MigrationTask["Migration Task (one-off)<br/>PostgreSQL Client<br/>Runs 4 SQL migrations"]
+                    AppService["ECS Service: reservflow<br/>Next.js Container :3000<br/>256 CPU | 512 MB"]
+                    MigrationTask["Migration Task (one-off)<br/>postgres:15-alpine<br/>SQL migrations + seeds"]
                 end
 
                 subgraph DataLayer["Data Layer"]
-                    RDS[("RDS PostgreSQL 15<br/>db.t3.micro | 20 GB<br/>Encrypted | Private")]
-                    Redis[("ElastiCache Redis 7.x<br/>cache.t3.micro<br/>Encryption in transit")]
+                    RDS[("RDS PostgreSQL 15<br/>db.t3.micro | 20 GB<br/>Encrypted | SSL required")]
+                    Redis[("ElastiCache Redis 7.x<br/>cache.t3.micro<br/>Transit encryption")]
+                end
+
+                subgraph VPCEndpoints["VPC Endpoints (No Internet Required)"]
+                    ECRA["ecr.api (Interface)"]
+                    ECRD["ecr.dkr (Interface)"]
+                    S3GW["s3 (Gateway)"]
+                    SME["secretsmanager (Interface)"]
+                    CWL["logs (Interface)"]
                 end
             end
         end
 
-        subgraph Supporting["Supporting Services"]
-            ECR["ECR Repository<br/>reservflow<br/>Image scanning enabled"]
-            SM["Secrets Manager<br/>DATABASE_URL<br/>REDIS_URL<br/>RDS Password"]
-            CW["CloudWatch<br/>Log Group (14d retention)<br/>CPU/Memory/Health Alarms"]
-            SNS["SNS Topic<br/>Alarm Notifications"]
+        subgraph Supporting["Supporting Services (accessed via VPC Endpoints)"]
+            ECR["ECR Repository"]
+            SM["Secrets Manager"]
+            CW["CloudWatch Logs + Alarms"]
+            SNS["SNS Topic"]
         end
     end
 
-    %% Traffic Flow
-    User -->|HTTPS| CDN
-    CDN -->|HTTP :80| ALB
+    User -->|"HTTP :80<br/>(allowed IP/32)"| ALB
     ALB -->|HTTP :3000| AppService
     AppService -->|TCP :5432| RDS
     AppService -->|TCP :6379| Redis
     MigrationTask -->|TCP :5432| RDS
 
-    %% Supporting connections
-    AppService -.->|Pull image| ECR
-    AppService -.->|Resolve secrets| SM
-    MigrationTask -.->|Resolve secrets| SM
-    AppService -.->|Logs| CW
-    CW -.->|Alarm| SNS
-    PrivateSubnets -.->|Outbound| NAT
-    NAT -.->|Internet| IGW
-
-    %% Styling
-    classDef aws fill:#FF9900,stroke:#232F3E,color:#232F3E
-    classDef compute fill:#ED7100,stroke:#232F3E,color:white
-    classDef database fill:#3B48CC,stroke:#232F3E,color:white
-    classDef network fill:#8C4FFF,stroke:#232F3E,color:white
-    classDef security fill:#DD344C,stroke:#232F3E,color:white
-
-    class CDN,ALB,NAT,IGW network
-    class AppService,MigrationTask compute
-    class RDS,Redis database
-    class SM security
-    class ECR,CW,SNS aws
+    AppService -.->|"HTTPS :443<br/>(VPC Endpoint)"| ECRA
+    AppService -.->|"HTTPS :443<br/>(VPC Endpoint)"| SME
+    AppService -.->|"HTTPS :443<br/>(VPC Endpoint)"| CWL
+    ECSCluster -.->|"S3 layers<br/>(Gateway Endpoint)"| S3GW
 ```
 
-## Security Group Rules
+## Security Group Matrix
 
 ```mermaid
 graph LR
-    subgraph SecurityGroups["Security Group Matrix"]
-        Internet2["0.0.0.0/0"] -->|"TCP 80, 443"| ALBSG["ALB SG"]
-        ALBSG -->|"TCP 3000"| ECSSG["ECS Task SG"]
-        ECSSG -->|"TCP 5432"| RDSSG["RDS SG"]
-        ECSSG -->|"TCP 6379"| ECSG["ElastiCache SG"]
-    end
+    YourIP["148.201.180.170/32"] -->|"TCP 80"| ALBSG["ALB SG"]
+    ALBSG -->|"TCP 3000"| ECSSG["ECS Task SG"]
+    ECSSG -->|"TCP 5432"| RDSSG["RDS SG"]
+    ECSSG -->|"TCP 6379"| ECSG["ElastiCache SG"]
+    ECSSG -->|"TCP 443"| VPCESG["VPC Endpoints SG"]
+    ECSSG -->|"TCP 443"| S3PL["S3 Prefix List"]
+    VPC_CIDR["VPC 10.0.0.0/16"] -->|"TCP 443"| VPCESG
 
     style ALBSG fill:#8C4FFF,stroke:#232F3E,color:white
     style ECSSG fill:#ED7100,stroke:#232F3E,color:white
     style RDSSG fill:#3B48CC,stroke:#232F3E,color:white
     style ECSG fill:#3B48CC,stroke:#232F3E,color:white
+    style VPCESG fill:#3B8624,stroke:#232F3E,color:white
+    style S3PL fill:#3B8624,stroke:#232F3E,color:white
 ```
 
-## Terraform Module Dependencies
+## Network Flow (No Internet)
 
-```mermaid
-graph TD
-    ROOT["main.tf<br/>(Root Module)"] --> VPC["modules/vpc"]
-    ROOT --> ECR["modules/ecr"]
-    ROOT --> SECRETS["modules/secrets"]
-    ROOT --> OBS["modules/observability"]
-    ROOT --> RDS["modules/rds"]
-    ROOT --> ELASTI["modules/elasticache"]
-    ROOT --> ALB["modules/alb"]
-    ROOT --> ECS["modules/ecs"]
-    ROOT --> CFRONT["modules/cloudfront"]
-
-    %% Dependencies (outputs → inputs)
-    VPC -->|"vpc_id, subnet_ids, sg_ids"| RDS
-    VPC -->|"vpc_id, subnet_ids, sg_ids"| ELASTI
-    VPC -->|"vpc_id, public_subnet_ids, alb_sg_id"| ALB
-    VPC -->|"private_subnet_ids, ecs_task_sg_id"| ECS
-    SECRETS -->|"secret_arns"| ECS
-    ALB -->|"target_group_arn"| ECS
-    ALB -->|"alb_dns_name"| CFRONT
-    ECR -->|"repository_url"| ECS
-    OBS -->|"log_group_name"| ECS
-    ECS -->|"cluster_name, service_name"| OBS
-
-    style ROOT fill:#232F3E,stroke:#FF9900,color:white
-    style VPC fill:#8C4FFF,stroke:#232F3E,color:white
-    style ECS fill:#ED7100,stroke:#232F3E,color:white
-    style RDS fill:#3B48CC,stroke:#232F3E,color:white
-    style ELASTI fill:#3B48CC,stroke:#232F3E,color:white
-    style ALB fill:#8C4FFF,stroke:#232F3E,color:white
-    style ECR fill:#ED7100,stroke:#232F3E,color:white
-    style CFRONT fill:#8C4FFF,stroke:#232F3E,color:white
-    style SECRETS fill:#DD344C,stroke:#232F3E,color:white
-    style OBS fill:#FF9900,stroke:#232F3E,color:white
-```
-
-## Deployment Flow
-
-```mermaid
-sequenceDiagram
-    participant Dev as Developer
-    participant ECR as ECR Registry
-    participant ECS as ECS Fargate
-    participant ALB as Load Balancer
-    participant CF as CloudFront
-    participant RDS as PostgreSQL
-
-    Note over Dev,RDS: Initial Setup (one-time)
-    Dev->>ECR: docker push reservflow:latest
-    Dev->>ECS: Run Migration Task
-    ECS->>RDS: Execute SQL migrations (001-004)
-    RDS-->>ECS: Schema created ✓
-
-    Note over Dev,CF: Application Deployment
-    Dev->>ECS: Update task definition (new image tag)
-    ECS->>ECR: Pull container image
-    ECS->>ECS: Launch new task (rolling update)
-    ECS->>ALB: Register healthy target
-    ALB->>CF: Origin responds
-    CF-->>Dev: Application live ✓
-```
+1. User → ALB (HTTP :80, restricted to allowed IP)
+2. ALB → ECS Tasks (HTTP :3000, private subnet)
+3. ECS Tasks → RDS (TCP :5432, private subnet, SSL required)
+4. ECS Tasks → ElastiCache (TCP :6379, private subnet, TLS)
+5. ECS Tasks → VPC Endpoints (HTTPS :443, private subnet, AWS internal network)
+6. VPC Endpoints → ECR/S3/Secrets Manager/CloudWatch (AWS backbone, never internet)
 
 ## Tags (SCP Compliance)
 
-All resources are tagged with:
+All resources tagged with:
 - `Team = "team-7"`
 - `Name = "daniel.guzman@iteso.mx"`
+- `Owner = "daniel.guzman@iteso.mx"`
 
-Applied via Terraform `default_tags` provider block + explicit tags where required at creation time.
+Applied via Terraform `default_tags` + explicit tags on every resource.
+
+## Terraform Outputs
+
+| Output | Value |
+|--------|-------|
+| ALB DNS | `reservflow-dev-alb-856383033.us-east-1.elb.amazonaws.com` |
+| ECR URL | `311141527383.dkr.ecr.us-east-1.amazonaws.com/reservflow-dev` |
+| RDS Endpoint | `reservflow-dev.csvwmqq42i9w.us-east-1.rds.amazonaws.com:5432` |
