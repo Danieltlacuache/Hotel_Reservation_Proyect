@@ -2,7 +2,7 @@
   "containerOverrides": [
     {
       "name": "migration",
-      "command": ["sh", "-c", "unset DATABASE_URL && export PGPASSWORD=Nino2004NumNum && export PGSSLMODE=require && psql -h reservflow-dev.csvwmqq42i9w.us-east-1.rds.amazonaws.com -p 5432 -U reservflow_admin -d reservflow -c 'DELETE FROM reservations; DELETE FROM room_inventory; DELETE FROM guests; DELETE FROM rooms;' && psql -h reservflow-dev.csvwmqq42i9w.us-east-1.rds.amazonaws.com -p 5432 -U reservflow_admin -d reservflow -f /seeds/seed_rooms.sql"]
+      "image": "311141527383.dkr.ecr.us-east-1.amazonaws.com/reservflow-dev:fix"
     }
   ]
 }

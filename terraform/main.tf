@@ -103,7 +103,7 @@ module "elasticache" {
 module "secrets" {
   source = "./modules/secrets"
 
-  database_url = "postgresql://reservflow_admin:${var.db_password}@${module.rds.address}:${module.rds.port}/reservflow"
+  database_url = "postgresql://reservflow_admin:${var.db_password}@${module.rds.address}:${module.rds.port}/reservflow?sslmode=no-verify"
   redis_url    = "rediss://${module.elasticache.primary_endpoint}:${module.elasticache.port}"
   rds_password = var.db_password
   environment  = var.environment

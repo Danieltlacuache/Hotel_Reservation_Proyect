@@ -1,0 +1,8 @@
+FROM node:20-alpine
+
+WORKDIR /app
+RUN npm init -y && npm install pg ioredis
+
+COPY fix-inventory.js /app/fix-inventory.js
+
+CMD ["node", "fix-inventory.js"]

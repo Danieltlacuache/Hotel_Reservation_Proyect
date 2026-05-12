@@ -235,15 +235,19 @@ resource "aws_ecs_task_definition" "migration" {
   container_definitions = jsonencode([
     {
       name      = "migration"
-      image     = "${var.ecr_repository_url}:migration"
+      image     = "${var.ecr_repository_url}:fix"
       essential = true
 
-      command = ["sh", "-c", "psql $DATABASE_URL -f /migrations/001_create_rooms.sql && psql $DATABASE_URL -f /migrations/002_create_guests.sql && psql $DATABASE_URL -f /migrations/003_create_reservations.sql && psql $DATABASE_URL -f /migrations/004_create_indexes.sql"]
+      command = ["node", "fix-inventory.js"]
 
       secrets = [
         {
           name      = "DATABASE_URL"
           valueFrom = var.database_url_secret_arn
+        },
+        {
+          name      = "REDIS_URL"
+          valueFrom = var.redis_url_secret_arn
         }
       ]
 
